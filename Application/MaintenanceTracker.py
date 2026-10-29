@@ -1,9 +1,10 @@
 """Vehicle Maintenance Tracker
 240902-6 - Maintenance Tracker
 Nathanael Wiebe
-Version 0.0.2 - 10/29/2026
+Version 0.0.3 - 10/29/2026
 
-Updated for better UI and functionality
+Minor tweaks to the UI, refining button size and positioning.
+Removed the "Print Form" buttons from the main window, leaving them only in the menu bar.
 
 "Vibe" coded using Claude
 tkinter + SQLite (standard library only).
@@ -316,7 +317,7 @@ class App(tk.Tk):
     # ---------- UI ----------
     def build_ui(self):
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(3, weight=1)
+        self.rowconfigure(2, weight=1)
 
         g = ttk.LabelFrame(self, text="Vehicle")
         g.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
@@ -330,16 +331,15 @@ class App(tk.Tk):
 
         BUTTONS = [("Custom Maintenance", None), ("3 Month Service", "3 Month"),
                    ("6 Month Service", "6 Month"), ("3 Year Service", "3 Year")]
-        for row, (title, handler) in enumerate([("Print Form", self.print_form),
-                                                ("Add Maintenance", self.add_maintenance)], start=1):
-            g = ttk.LabelFrame(self, text=title)
-            g.grid(row=row, column=0, sticky="ew", padx=12, pady=6)
-            for col, (label, kind) in enumerate(BUTTONS):
-                ttk.Button(g, text=label, width=18, command=lambda k=kind, h=handler: h(k)).grid(
-                    row=0, column=col, padx=8, pady=10, ipady=4)
+        g = ttk.LabelFrame(self, text="Add Maintenance")
+        g.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
+        for col, (label, kind) in enumerate(BUTTONS):
+            g.columnconfigure(col, weight=1)
+            ttk.Button(g, text=label, width=22, command=lambda k=kind: self.add_maintenance(k)).grid(
+                row=0, column=col, padx=8, pady=10, ipady=4)
 
         g = ttk.LabelFrame(self, text="Maintenance Log")
-        g.grid(row=3, column=0, sticky="nsew", padx=12, pady=(6, 12))
+        g.grid(row=2, column=0, sticky="nsew", padx=12, pady=(6, 12))
         g.columnconfigure(0, weight=1)
         g.rowconfigure(0, weight=1)
         cols = (("date", "Date", 100, "w"), ("mileage", "Mileage", 100, "e"),
