@@ -1,10 +1,9 @@
 """Vehicle Maintenance Tracker
 240902-6 - Maintenance Tracker
 Nathanael Wiebe
-Version 0.0.3 - 10/29/2026
+Version 0.0.4 - 10/29/2026
 
-Minor tweaks to the UI, refining button size and positioning.
-Removed the "Print Form" buttons from the main window, leaving them only in the menu bar.
+Adjusted the Add and edit vehicle buttons and added a Copy VIN button to the vehicle section. The Copy VIN button copies the VIN of the selected vehicle to the clipboard and shows a confirmation message.
 
 "Vibe" coded using Claude
 tkinter + SQLite (standard library only).
@@ -321,12 +320,16 @@ class App(tk.Tk):
 
         g = ttk.LabelFrame(self, text="Vehicle")
         g.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
-        g.columnconfigure(0, weight=1)  # empty spacer column pushes everything to the right
-        ttk.Button(g, text="Add Vehicle", command=self.add_vehicle).grid(row=0, column=1, rowspan=2, padx=8, pady=10)
-        ttk.Button(g, text="Edit Vehicle", command=self.edit_vehicle).grid(row=0, column=2, rowspan=2, padx=8, pady=10)
-        ttk.Label(g, text="Select Vehicle").grid(row=0, column=3, sticky="sw", padx=(16, 0))
+        g.columnconfigure(0, weight=1)  # empty spacer column pushes the controls right
+        ttk.Button(g, text="Add Vehicle", command=self.add_vehicle).grid(
+            row=1, column=1, padx=(0, 8), pady=(0, 10), sticky="nsew")
+        ttk.Button(g, text="Edit Vehicle", command=self.edit_vehicle).grid(
+            row=1, column=2, padx=(0, 8), pady=(0, 10), sticky="nsew")
+        ttk.Label(g, text="Select Vehicle").grid(row=0, column=3, sticky="sw", padx=(16, 0), pady=(6, 0))
         self.combo = ttk.Combobox(g, state="readonly", width=40)
-        self.combo.grid(row=1, column=3, padx=(16, 8), pady=(0, 8))
+        self.combo.grid(row=1, column=3, padx=(16, 8), pady=(0, 10), sticky="nsew")
+        ttk.Button(g, text="Copy VIN", command=self.copy_vin).grid(
+            row=1, column=4, padx=(0, 40), pady=(0, 10), sticky="nsew")
         self.combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_log())
 
         BUTTONS = [("Custom Maintenance", None), ("3 Month Service", "3 Month"),
@@ -380,6 +383,7 @@ class App(tk.Tk):
         veh_m = tk.Menu(bar, tearoff=0)
         veh_m.add_command(label="Add Vehicle...", command=self.add_vehicle)
         veh_m.add_command(label="Edit Vehicle...", command=self.edit_vehicle)
+        veh_m.add_command(label="Copy VIN", command=self.copy_vin)
         veh_m.add_separator()
         veh_m.add_command(label="Remove Vehicle...", command=self.remove_vehicle)
         bar.add_cascade(label="Vehicle", menu=veh_m)
@@ -468,6 +472,15 @@ class App(tk.Tk):
                 self.refresh_vehicles(v["id"])
             except sqlite3.IntegrityError:
                 messagebox.showerror("Duplicate VIN", "A vehicle with that VIN already exists.")
+
+    def copy_vin(self):
+        v = self.require_vehicle()
+        if not v:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(v["vin"])
+        self.update()  # makes sure the text is on the clipboard before the popup appears
+        messagebox.showinfo("Copy VIN", "VIN copied to the clipboard")
 
     def remove_vehicle(self):
         v = self.require_vehicle()
