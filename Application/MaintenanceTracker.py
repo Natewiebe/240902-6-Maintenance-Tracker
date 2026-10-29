@@ -1,13 +1,15 @@
 """Vehicle Maintenance Tracker
 240902-6 - Maintenance Tracker
 Nathanael Wiebe
-Version 0.0.1 - 10/27/2026
+Version 0.0.2 - 10/29/2026
+
+Updated for better UI and functionality
 
 "Vibe" coded using Claude
 tkinter + SQLite (standard library only).
 
 Folder layout (all next to this script):
-    forms/   your pre-made PDFs, e.g. 02_6_Month_Maintenance_Interval_A.pdf
+    forms/   pre-made PDFs, e.g. 02_6_Month_Maintenance_Interval_A.pdf
     scans/   created automatically; attached scans are copied here
     maintenance.db
 """
@@ -35,8 +37,9 @@ SERVICE_NAMES = {"3 Month": "3 Month Service", "6 Month": "6 Month Service",
                  "3 Year": "3 Year Service", "6 Year": "6 Year Service",
                  "9 Year": "9 Year Service", None: ""}
 # Order used by the menus (the main window keeps buttons for the first four only).
-MENU_INTERVALS = [(None, "Custom Maintenance"), ("3 Month", "3 Month"), ("6 Month", "6 Month"),
-                  ("3 Year", "3 Year"), ("6 Year", "6 Year"), ("9 Year", "9 Year")]
+MENU_INTERVALS = [(None, "Custom Maintenance"), ("3 Month", "3 Month Service"),
+                  ("6 Month", "6 Month Service"), ("3 Year", "3 Year Service"),
+                  ("6 Year", "6 Year Service"), ("9 Year", "9 Year Service")]
 
 # Optional: path to SumatraPDF.exe. If set, Print Form opens the print dialog
 # directly. Otherwise the PDF opens in your default viewer (then press Ctrl+P).
@@ -325,23 +328,22 @@ class App(tk.Tk):
         self.combo.grid(row=1, column=3, padx=(16, 8), pady=(0, 8))
         self.combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_log())
 
+        BUTTONS = [("Custom Maintenance", None), ("3 Month Service", "3 Month"),
+                   ("6 Month Service", "6 Month"), ("3 Year Service", "3 Year")]
         for row, (title, handler) in enumerate([("Print Form", self.print_form),
                                                 ("Add Maintenance", self.add_maintenance)], start=1):
             g = ttk.LabelFrame(self, text=title)
             g.grid(row=row, column=0, sticky="ew", padx=12, pady=6)
-            for col, (label, kind) in enumerate([("Custom\nMaintenance", None), ("3 Month", "3 Month"),
-                                                 ("6 Month", "6 Month"), ("3 Year", "3 Year")]):
-                g.columnconfigure(col, weight=1, uniform="btn")
-                ttk.Button(g, text=label, command=lambda k=kind, h=handler: h(k)).grid(
-                    row=0, column=col, padx=8, pady=10, sticky="ew", ipady=4)
+            for col, (label, kind) in enumerate(BUTTONS):
+                ttk.Button(g, text=label, width=18, command=lambda k=kind, h=handler: h(k)).grid(
+                    row=0, column=col, padx=8, pady=10, ipady=4)
 
         g = ttk.LabelFrame(self, text="Maintenance Log")
         g.grid(row=3, column=0, sticky="nsew", padx=12, pady=(6, 12))
         g.columnconfigure(0, weight=1)
         g.rowconfigure(0, weight=1)
-        cols = (("date", "Date", 85, "w"), ("mileage", "Mileage", 75, "e"), ("service", "Service", 120, "w"),
-                ("cost", "Cost", 70, "e"), ("hours", "Hours", 50, "e"), ("scan", "Scan", 45, "center"),
-                ("parts", "Parts / Fluids", 170, "w"), ("notes", "Notes", 170, "w"))
+        cols = (("date", "Date", 100, "w"), ("mileage", "Mileage", 100, "e"),
+                ("service", "Service", 220, "w"), ("scan", "Scan", 60, "center"))
         self.tree = ttk.Treeview(g, columns=[c[0] for c in cols], show="headings", selectmode="browse")
         for key, text, width, anchor in cols:
             self.tree.heading(key, text=text)
@@ -495,10 +497,7 @@ class App(tk.Tk):
                 r["service_date"],
                 f"{r['mileage']:,}" if r["mileage"] is not None else "",
                 r["service"],
-                f"${r['cost']:,.2f}" if r["cost"] is not None else "",
-                f"{r['hours']:g}" if r["hours"] is not None else "",
-                "Yes" if r["scan_path"] else "",
-                one(r["parts"]), one(r["notes"])))
+                "Yes" if r["scan_path"] else ""))
 
     def finish_scan(self, path, vin, when, service):
         """Copy a newly chosen (absolute) scan into scans/; leave stored paths alone."""
