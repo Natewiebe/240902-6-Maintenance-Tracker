@@ -1,9 +1,9 @@
 """Vehicle Maintenance Tracker
 240902-6 - Maintenance Tracker
 Nathanael Wiebe
-Version 0.2.0 - 10/30/2026
+Version 0.2.1 - 10/30/2026
 
-Added the ability to attach multiple scans to a maintenance entry, and to manage them (add/remove/open) after the fact. The old single-scan field is still supported for backwards compatibility, but new entries will use the attachments table instead.
+Added custom naming for custom maintenance entries.
 
 Although I'm probably not using it exactly right, I am following the principles of
 Semantic Versioning (https://semver.org/):
@@ -370,7 +370,7 @@ class MaintenanceDialog(tk.Toplevel):
     """Mirrors the paper form: Vehicle / VIN / Date / Mileage header, plus the
     notes the form asks for (parts & fluids, total cost, time spent)."""
     SERVICES = ["3 Month Service", "6 Month Service", "3 Year Service",
-                "6 Year Service", "9 Year Service", "Custom Maintenance"]
+                "6 Year Service", "9 Year Service"]
 
     def __init__(self, parent, desc, vin, record=None, service="", files=()):
         super().__init__(parent)
@@ -389,7 +389,7 @@ class MaintenanceDialog(tk.Toplevel):
         ttk.Label(self, text=desc, font=("TkDefaultFont", 9, "bold")).grid(row=0, column=1, sticky="w", padx=10)
         ttk.Label(self, text="VIN").grid(row=1, column=0, sticky="w", padx=10, pady=3)
         ttk.Label(self, text=vin).grid(row=1, column=1, sticky="w", padx=10)
-        rows = [("Date (YYYY-MM-DD)", "date"), ("Mileage", "mileage"), ("Service", "service"),
+        rows = [("Date (YYYY-MM-DD)", "date"), ("Mileage", "mileage"), ("Service / Name", "service"),
                 ("Total cost ($)", "cost"), ("Time spent (hours)", "hours")]
         for r, (text, key) in enumerate(rows, start=2):
             ttk.Label(self, text=text).grid(row=r, column=0, sticky="w", padx=10, pady=3)
@@ -398,6 +398,8 @@ class MaintenanceDialog(tk.Toplevel):
             else:
                 w = ttk.Entry(self, width=37, textvariable=self.vars[key])
             w.grid(row=r, column=1, sticky="w", padx=10, pady=3)
+            if key == "service":
+                self.service_box = w
         self.parts = self._text("Parts & fluids used\n(part numbers)", 7, 3, record["parts"] if record else "")
         self.notes = self._text("Notes", 8, 4, record["notes"] if record else "")
         ttk.Label(self, text="Attachments").grid(row=9, column=0, sticky="nw", padx=10, pady=3)
@@ -408,6 +410,8 @@ class MaintenanceDialog(tk.Toplevel):
         ttk.Button(btns, text="Save", command=self.save).pack(side="left", padx=6)
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=6)
         self.bind("<Escape>", lambda e: self.destroy())
+        if not self.vars["service"].get():  # custom maintenance: start typing the name right away
+            self.service_box.focus_set()        
         center_on_parent(self, parent)
         self.transient(parent)
         self.grab_set()
@@ -431,7 +435,9 @@ class MaintenanceDialog(tk.Toplevel):
             return messagebox.showerror(
                 "Invalid entry", "Check the date (YYYY-MM-DD), mileage, cost, and hours.", parent=self)
         if not v["service"]:
-            return messagebox.showerror("Missing service", "Please enter a service.", parent=self)
+            return messagebox.showerror(
+                "Missing name", "Enter a name for this maintenance, e.g. Replaced Crankshaft Position Sensor.",
+                parent=self)
         self.result = {"date": v["date"], "mileage": mileage, "service": v["service"],
                        "cost": cost, "hours": hours, "files": list(self.attach.files),
                        "parts": self.parts.get("1.0", "end").strip(),
