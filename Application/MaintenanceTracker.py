@@ -1,9 +1,9 @@
 """Vehicle Maintenance Tracker
 240902-6 - Maintenance Tracker
 Nathanael Wiebe
-Version 0.1.0 - 10/30/2026
+Version 0.2.0 - 10/30/2026
 
-Added Fuel Fillup and Code Scan entries to the maintenance log. The Fuel Fillup entry calculates MPG based on the previous fillup. The Code Scan entry allows entering multiple codes with descriptions.
+Added the ability to attach multiple scans to a maintenance entry, and to manage them (add/remove/open) after the fact. The old single-scan field is still supported for backwards compatibility, but new entries will use the attachments table instead.
 
 Although I'm probably not using it exactly right, I am following the principles of
 Semantic Versioning (https://semver.org/):
@@ -140,7 +140,7 @@ def store_scan(src, vin, service_date, service):
     src = Path(src)
     folder = SCANS_DIR / safe_name(vin)
     folder.mkdir(parents=True, exist_ok=True)
-    stem = f"{service_date}_{safe_name(service)}"
+    stem = f"{service_date}_{safe_name(service)}_{safe_name(src.stem)}"
     dest, n = folder / f"{stem}{src.suffix.lower()}", 2
     while dest.exists():
         dest = folder / f"{stem}_{n}{src.suffix.lower()}"
@@ -159,6 +159,16 @@ class DB:
         for col, typ in MIGRATE_COLS.items():  # upgrade a database from an older version
             if col not in have:
                 self.conn.execute(f"ALTER TABLE maintenance ADD COLUMN {col} {typ}")
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS attachments ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "maintenance_id INTEGER NOT NULL REFERENCES maintenance(id) ON DELETE CASCADE, "
+            "path TEXT NOT NULL)")
+        # one-time move of the old single scan into the new table (safe to run every launch)
+        self.conn.execute(
+            "INSERT INTO attachments (maintenance_id, path) "
+            "SELECT id, scan_path FROM maintenance WHERE scan_path IS NOT NULL AND scan_path != ''")
+        self.conn.execute("UPDATE maintenance SET scan_path = '' WHERE scan_path != ''")
         self.conn.commit()
 
     def vehicles(self):
@@ -190,11 +200,30 @@ class DB:
         return self.conn.execute("SELECT * FROM maintenance WHERE id=?", (log_id,)).fetchone()
 
     def add_log(self, vid, d):
-        self.conn.execute(
+        cur = self.conn.execute(
             "INSERT INTO maintenance (vehicle_id, vehicle_desc, vin, service_date, mileage, "
             "service, cost, hours, parts, notes, scan_path, kind, quantity, codes) VALUES "
             "(:vid, :vehicle_desc, :vin, :date, :mileage, :service, :cost, :hours, :parts, "
             ":notes, :scan_path, :kind, :quantity, :codes)", {**BLANK_RECORD, **d, "vid": vid})
+        self.conn.commit()
+        return cur.lastrowid
+
+    def attachments(self, log_id):
+        return self.conn.execute(
+            "SELECT * FROM attachments WHERE maintenance_id=? ORDER BY id", (log_id,)).fetchall()
+
+    def attachment_counts(self, vid):
+        rows = self.conn.execute(
+            "SELECT maintenance_id, COUNT(*) AS n FROM attachments WHERE maintenance_id IN "
+            "(SELECT id FROM maintenance WHERE vehicle_id=?) GROUP BY maintenance_id", (vid,))
+        return {r["maintenance_id"]: r["n"] for r in rows}
+
+    def add_attachment(self, log_id, path):
+        self.conn.execute("INSERT INTO attachments (maintenance_id, path) VALUES (?, ?)", (log_id, path))
+        self.conn.commit()
+
+    def delete_attachment(self, att_id):
+        self.conn.execute("DELETE FROM attachments WHERE id=?", (att_id,))
         self.conn.commit()
 
     def update_log(self, log_id, d):
@@ -268,6 +297,74 @@ class VehicleDialog(tk.Toplevel):
         self.result = d
         self.destroy()
 
+class AttachmentList(ttk.Frame):
+    """Attached-files list with Add / Remove / Open buttons.
+    `files` holds stored (relative) paths for saved files and absolute paths for newly picked ones."""
+
+    def __init__(self, parent, files=()):
+        super().__init__(parent)
+        self.files = list(files)
+        self.box = tk.Listbox(self, width=46, height=5, selectmode="extended", activestyle="none")
+        self.box.grid(row=0, column=0, rowspan=4, sticky="nsew")
+        for row, (text, cmd) in enumerate([("Add Files...", self.add_files), ("Remove", self.remove),
+                                           ("Open", self.open_selected)]):
+            ttk.Button(self, text=text, width=12, command=cmd).grid(
+                row=row, column=1, padx=(6, 0), pady=1, sticky="n")
+        self.box.bind("<Double-1>", lambda e: self.open_selected())
+        self.refresh()
+
+    def refresh(self):
+        self.box.delete(0, "end")
+        for f in self.files:
+            self.box.insert("end", Path(f).name + ("  (new)" if Path(f).is_absolute() else ""))
+
+    def add_files(self):
+        picked = filedialog.askopenfilenames(
+            parent=self.winfo_toplevel(), title="Select files to attach", filetypes=SCAN_TYPES)
+        for p in picked:
+            if p not in self.files:
+                self.files.append(p)
+        self.refresh()
+
+    def remove(self):
+        for i in reversed(self.box.curselection()):
+            del self.files[i]
+        self.refresh()
+
+    def open_selected(self):
+        sel = self.box.curselection()
+        if not sel:
+            return
+        p = Path(self.files[sel[0]])
+        p = p if p.is_absolute() else BASE_DIR / p
+        if p.exists():
+            open_file(p)
+        else:
+            messagebox.showerror("File missing", f"Could not find:\n{p}", parent=self.winfo_toplevel())
+
+
+class AttachmentsDialog(tk.Toplevel):
+    def __init__(self, parent, title, files):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        self.result = None
+        self.attach = AttachmentList(self, files)
+        self.attach.pack(padx=10, pady=10)
+        btns = ttk.Frame(self)
+        btns.pack(pady=(0, 10))
+        ttk.Button(btns, text="Save", command=self.save).pack(side="left", padx=6)
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=6)
+        self.bind("<Escape>", lambda e: self.destroy())
+        center_on_parent(self, parent)
+        self.transient(parent)
+        self.grab_set()
+        self.wait_window(self)
+
+    def save(self):
+        self.result = list(self.attach.files)
+        self.destroy()
+
 
 class MaintenanceDialog(tk.Toplevel):
     """Mirrors the paper form: Vehicle / VIN / Date / Mileage header, plus the
@@ -275,12 +372,11 @@ class MaintenanceDialog(tk.Toplevel):
     SERVICES = ["3 Month Service", "6 Month Service", "3 Year Service",
                 "6 Year Service", "9 Year Service", "Custom Maintenance"]
 
-    def __init__(self, parent, desc, vin, record=None, service=""):
+    def __init__(self, parent, desc, vin, record=None, service="", files=()):
         super().__init__(parent)
         self.title("Edit Maintenance" if record else "Add Maintenance")
         self.resizable(False, False)
         self.result = None
-        self.scan = (record["scan_path"] or "") if record else ""
         fmt = lambda v, f="{}": f.format(v) if v is not None else ""
         self.vars = {
             "date": tk.StringVar(value=record["service_date"] if record else date.today().isoformat()),
@@ -304,14 +400,9 @@ class MaintenanceDialog(tk.Toplevel):
             w.grid(row=r, column=1, sticky="w", padx=10, pady=3)
         self.parts = self._text("Parts & fluids used\n(part numbers)", 7, 3, record["parts"] if record else "")
         self.notes = self._text("Notes", 8, 4, record["notes"] if record else "")
-        ttk.Label(self, text="Scanned form").grid(row=9, column=0, sticky="w", padx=10, pady=3)
-        sf = ttk.Frame(self)
-        sf.grid(row=9, column=1, sticky="w", padx=10)
-        self.scan_lbl = ttk.Label(sf, width=24)
-        self.scan_lbl.pack(side="left")
-        ttk.Button(sf, text="Browse...", command=self.browse).pack(side="left", padx=2)
-        ttk.Button(sf, text="Clear", command=lambda: self.set_scan("")).pack(side="left")
-        self.set_scan(self.scan)
+        ttk.Label(self, text="Attachments").grid(row=9, column=0, sticky="nw", padx=10, pady=3)
+        self.attach = AttachmentList(self, files)
+        self.attach.grid(row=9, column=1, sticky="w", padx=10, pady=3)
         btns = ttk.Frame(self)
         btns.grid(row=10, column=0, columnspan=2, pady=10)
         ttk.Button(btns, text="Save", command=self.save).pack(side="left", padx=6)
@@ -329,15 +420,6 @@ class MaintenanceDialog(tk.Toplevel):
         t.insert("1.0", value or "")
         return t
 
-    def set_scan(self, path):
-        self.scan = path
-        self.scan_lbl.config(text=Path(path).name if path else "(none)")
-
-    def browse(self):
-        p = filedialog.askopenfilename(parent=self, title="Select scanned form", filetypes=SCAN_TYPES)
-        if p:
-            self.set_scan(p)
-
     def save(self):
         v = {k: var.get().strip() for k, var in self.vars.items()}
         try:
@@ -351,7 +433,7 @@ class MaintenanceDialog(tk.Toplevel):
         if not v["service"]:
             return messagebox.showerror("Missing service", "Please enter a service.", parent=self)
         self.result = {"date": v["date"], "mileage": mileage, "service": v["service"],
-                       "cost": cost, "hours": hours, "scan_path": self.scan,
+                       "cost": cost, "hours": hours, "files": list(self.attach.files),
                        "parts": self.parts.get("1.0", "end").strip(),
                        "notes": self.notes.get("1.0", "end").strip()}
         self.destroy()
@@ -553,13 +635,12 @@ class App(tk.Tk):
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=(8, 2))
         sb.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=(8, 2))
-        ttk.Label(g, text="Double-click to edit  |  Right-click for scan options",
+        ttk.Label(g, text="Double-click to edit  |  Right-click for attachments",
                   foreground="gray").grid(row=1, column=0, sticky="w", padx=8, pady=(0, 6))
 
         self.menu = tk.Menu(self, tearoff=0)
         self.menu.add_command(label="Edit entry...", command=self.edit_entry)
-        self.menu.add_command(label="Open scan", command=self.open_scan)
-        self.menu.add_command(label="Attach scan...", command=self.attach_scan)
+        self.menu.add_command(label="Attachments...", command=self.manage_attachments)
         self.menu.add_separator()
         self.menu.add_command(label="Delete entry", command=self.delete_entry)
         self.tree.bind("<Double-1>", lambda e: self.edit_entry() if self.tree.identify_row(e.y) else None)
@@ -598,9 +679,8 @@ class App(tk.Tk):
         bar.add_cascade(label="Print Form", menu=print_m)
 
         entry_m = tk.Menu(bar, tearoff=0)
-        for label, fn in [("Edit Entry...", self.edit_entry), ("Open Scan", self.open_scan),
-                          ("Attach Scan...", self.attach_scan), (None, None),
-                          ("Delete Entry", self.delete_entry)]:
+        for label, fn in [("Edit Entry...", self.edit_entry), ("Attachments...", self.manage_attachments)
+                          , (None, None), ("Delete Entry", self.delete_entry)]:
             if label is None:
                 entry_m.add_separator()
             else:
@@ -629,6 +709,28 @@ class App(tk.Tk):
             self.tree.selection_set(row)
             self.menu.tk_popup(e.x_root, e.y_root)
             self.menu.grab_release()
+
+    def sync_attachments(self, log_id, vin, when, service, files):
+        keep = {f for f in files if not Path(f).is_absolute()}
+        for a in self.db.attachments(log_id):
+            if a["path"] not in keep:
+                self.db.delete_attachment(a["id"])
+        for f in files:
+            if Path(f).is_absolute():  # newly picked: copy into scans/<VIN>/ and record it
+                rel = self.finish_scan(f, vin, when, service)
+                if rel:
+                    self.db.add_attachment(log_id, rel)
+
+    def manage_attachments(self):
+        log_id, v = self.selected_id(), self.current_vehicle()
+        if not log_id or not v:
+            return
+        rec = self.db.get_log(log_id)
+        files = [a["path"] for a in self.db.attachments(log_id)]
+        dlg = AttachmentsDialog(self, f"Attachments - {rec['service']}", files)
+        if dlg.result is not None:
+            self.sync_attachments(log_id, rec["vin"] or v["vin"], rec["service_date"], rec["service"], dlg.result)
+            self.refresh_log()
 
     # ---------- Vehicles ----------
     def current_vehicle(self):
@@ -710,6 +812,7 @@ class App(tk.Tk):
                       key=lambda r: r["mileage"])
         mpg = {cur["id"]: mpg_from(cur["mileage"], cur["quantity"], prev["mileage"] if prev else None)
                for prev, cur in zip([None] + fuel[:-1], fuel)}
+        counts = self.db.attachment_counts(v["id"])
         for r in rows:
             if r["kind"] == "fuel":
                 m = mpg.get(r["id"])
@@ -717,7 +820,8 @@ class App(tk.Tk):
             elif r["kind"] == "codes":
                 details = codes_summary(r["codes"])
             else:
-                details = "Scan attached" if r["scan_path"] else ""
+                n = counts.get(r["id"], 0)
+                details = f"{n} attachment{'s' if n != 1 else ''}" if n else ""
             self.tree.insert("", "end", iid=str(r["id"]), values=(
                 r["service_date"],
                 f"{r['mileage']:,}" if r["mileage"] is not None else "",
@@ -749,17 +853,19 @@ class App(tk.Tk):
             return
         rec = self.db.get_log(log_id)
         desc, vin, kind = rec["vehicle_desc"] or vehicle_desc(v), rec["vin"] or v["vin"], rec["kind"]
+        files = [a["path"] for a in self.db.attachments(log_id)]
         if kind == "fuel":
             dlg = FuelDialog(self, desc, vin, lambda m: self.db.prev_fuel_mileage(v["id"], m, log_id), rec)
         elif kind == "codes":
             dlg = CodeScanDialog(self, desc, vin, rec)
         else:
-            dlg = MaintenanceDialog(self, desc, vin, rec)
+            dlg = MaintenanceDialog(self, desc, vin, rec, files=files)
         if dlg.result:
             d = {**record_to_dict(rec), **dlg.result}
-            if kind not in ("fuel", "codes"):
-                d["scan_path"] = self.finish_scan(d["scan_path"], vin, d["date"], d["service"])
+            new_files = d.pop("files", None)
             self.db.update_log(log_id, d)
+            if new_files is not None:
+                self.sync_attachments(log_id, vin, d["date"], d["service"], new_files)
             self.refresh_log()
 
     def finish_scan(self, path, vin, when, service):
@@ -780,32 +886,11 @@ class App(tk.Tk):
         dlg = MaintenanceDialog(self, desc, v["vin"], service=SERVICE_NAMES[kind])
         if dlg.result:
             d = dlg.result
-            d["scan_path"] = self.finish_scan(d["scan_path"], v["vin"], d["date"], d["service"])
+            files = d.pop("files")
             d.update(vehicle_desc=desc, vin=v["vin"])
-            self.db.add_log(v["id"], d)
+            log_id = self.db.add_log(v["id"], d)
+            self.sync_attachments(log_id, v["vin"], d["date"], d["service"], files)
             self.refresh_log()
-
-    def open_scan(self):
-        log_id = self.selected_id()
-        rec = self.db.get_log(log_id) if log_id else None
-        if not rec or not rec["scan_path"]:
-            return messagebox.showinfo("No scan", "This entry has no scan attached yet.")
-        path = BASE_DIR / rec["scan_path"]
-        if not path.exists():
-            return messagebox.showerror("Scan missing", f"Could not find:\n{path}")
-        open_file(path)
-
-    def attach_scan(self):
-        log_id, v = self.selected_id(), self.current_vehicle()
-        if not log_id or not v:
-            return
-        src = filedialog.askopenfilename(title="Select scanned form", filetypes=SCAN_TYPES)
-        if src:
-            rec = self.db.get_log(log_id)
-            rel = self.finish_scan(src, rec["vin"] or v["vin"], rec["service_date"], rec["service"])
-            if rel:
-                self.db.set_scan(log_id, rel)
-                self.refresh_log()
 
     def delete_entry(self):
         log_id = self.selected_id()
