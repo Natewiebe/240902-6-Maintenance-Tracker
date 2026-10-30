@@ -1,7 +1,15 @@
 """Vehicle Maintenance Tracker
 240902-6 - Maintenance Tracker
 Nathanael Wiebe
-Version 0.0.4 - 10/29/2026
+Version 0.1.0 - 10/30/2026
+
+Added Fuel Fillup and Code Scan entries to the maintenance log. The Fuel Fillup entry calculates MPG based on the previous fillup. The Code Scan entry allows entering multiple codes with descriptions.
+
+Although I'm probably not using it exactly right, I am following the principles of
+Semantic Versioning (https://semver.org/):
+MAJOR version when you make incompatible API changes
+MINOR version when you add functionality in a backward compatible manner
+PATCH version when you make backward compatible bug fixes
 
 Adjusted the Add and edit vehicle buttons and added a Copy VIN button to the vehicle section. The Copy VIN button copies the VIN of the selected vehicle to the clipboard and shows a confirmation message.
 
@@ -20,6 +28,7 @@ import sqlite3
 import subprocess
 import sys
 import tkinter as tk
+import json
 from datetime import date, datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -35,7 +44,8 @@ FORM_TOKENS = {"3 Month": "3 month", "6 Month": "6 month", "3 Year": "3 year",
                "6 Year": "6 year", "9 Year": "9 year", None: "custom"}
 SERVICE_NAMES = {"3 Month": "3 Month Service", "6 Month": "6 Month Service",
                  "3 Year": "3 Year Service", "6 Year": "6 Year Service",
-                 "9 Year": "9 Year Service", None: ""}
+                 "9 Year": "9 Year Service", "fuel": "Fuel Fillup", 
+                 "codes": "Code Scan", None: "Custom Maintenance"}
 # Order used by the menus (the main window keeps buttons for the first four only).
 MENU_INTERVALS = [(None, "Custom Maintenance"), ("3 Month", "3 Month Service"),
                   ("6 Month", "6 Month Service"), ("3 Year", "3 Year Service"),
@@ -60,7 +70,8 @@ CREATE TABLE IF NOT EXISTS maintenance (
 );
 """
 MIGRATE_COLS = {"vehicle_desc": "TEXT", "vin": "TEXT", "hours": "REAL",
-                "parts": "TEXT", "scan_path": "TEXT"}
+                "parts": "TEXT", "scan_path": "TEXT",
+                "kind": "TEXT", "quantity": "REAL", "codes": "TEXT"}
 
 
 def vehicle_desc(v):
@@ -86,6 +97,43 @@ def find_form(kind):
 def safe_name(s):
     return re.sub(r"[^\w.-]+", "_", s).strip("_") or "x"
 
+
+def center_on_parent(win, parent):
+    """Position a dialog in the middle of its parent window."""
+    win.withdraw()  # hidden while we measure, so it doesn't flash at the top-left
+    win.update_idletasks()
+    x = parent.winfo_rootx() + (parent.winfo_width() - win.winfo_reqwidth()) // 2
+    y = parent.winfo_rooty() + (parent.winfo_height() - win.winfo_reqheight()) // 2
+    win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+    win.deiconify()
+
+
+BLANK_RECORD = {"mileage": None, "cost": None, "hours": None, "parts": "", "notes": "",
+                "scan_path": "", "kind": "service", "quantity": None, "codes": None}
+
+
+def mpg_from(miles, qty, prev_miles):
+    if prev_miles is None or not qty or qty <= 0 or miles <= prev_miles:
+        return None
+    return (miles - prev_miles) / qty
+
+
+def codes_summary(raw):
+    try:
+        items = json.loads(raw or "[]")
+    except ValueError:
+        return ""
+    items = [(c.strip(), d.strip()) for c, d in items if c.strip()]
+    if len(items) == 1 and items[0][1]:
+        return f"{items[0][0]} - {items[0][1]}"
+    return ", ".join(c for c, _ in items)
+
+
+def record_to_dict(r):
+    return {"date": r["service_date"], "mileage": r["mileage"], "service": r["service"],
+            "cost": r["cost"], "hours": r["hours"], "parts": r["parts"], "notes": r["notes"],
+            "scan_path": r["scan_path"], "kind": r["kind"] or "service",
+            "quantity": r["quantity"], "codes": r["codes"]}
 
 def store_scan(src, vin, service_date, service):
     """Copy a scan into scans/<VIN>/ and return its path relative to the app folder."""
@@ -144,17 +192,23 @@ class DB:
     def add_log(self, vid, d):
         self.conn.execute(
             "INSERT INTO maintenance (vehicle_id, vehicle_desc, vin, service_date, mileage, "
-            "service, cost, hours, parts, notes, scan_path) VALUES "
+            "service, cost, hours, parts, notes, scan_path, kind, quantity, codes) VALUES "
             "(:vid, :vehicle_desc, :vin, :date, :mileage, :service, :cost, :hours, :parts, "
-            ":notes, :scan_path)", {**d, "vid": vid})
+            ":notes, :scan_path, :kind, :quantity, :codes)", {**BLANK_RECORD, **d, "vid": vid})
         self.conn.commit()
 
     def update_log(self, log_id, d):
         self.conn.execute(
             "UPDATE maintenance SET service_date=:date, mileage=:mileage, service=:service, "
-            "cost=:cost, hours=:hours, parts=:parts, notes=:notes, scan_path=:scan_path "
-            "WHERE id=:id", {**d, "id": log_id})
+            "cost=:cost, hours=:hours, parts=:parts, notes=:notes, scan_path=:scan_path, "
+            "kind=:kind, quantity=:quantity, codes=:codes WHERE id=:id", {**d, "id": log_id})
         self.conn.commit()
+
+    def prev_fuel_mileage(self, vid, mileage, exclude_id=None):
+        row = self.conn.execute(
+            "SELECT MAX(mileage) FROM maintenance WHERE vehicle_id=? AND kind='fuel' "
+            "AND mileage < ? AND id != ?", (vid, mileage, exclude_id or -1)).fetchone()
+        return row[0]
 
     def set_scan(self, log_id, path):
         self.conn.execute("UPDATE maintenance SET scan_path=? WHERE id=?", (path, log_id))
@@ -194,6 +248,7 @@ class VehicleDialog(tk.Toplevel):
         ttk.Button(btns, text="Save", command=self.save).pack(side="left", padx=6)
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=6)
         self.bind("<Escape>", lambda e: self.destroy())
+        center_on_parent(self, parent)
         self.transient(parent)
         self.grab_set()
         self.entries["vin"].focus()
@@ -262,6 +317,7 @@ class MaintenanceDialog(tk.Toplevel):
         ttk.Button(btns, text="Save", command=self.save).pack(side="left", padx=6)
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=6)
         self.bind("<Escape>", lambda e: self.destroy())
+        center_on_parent(self, parent)
         self.transient(parent)
         self.grab_set()
         self.wait_window(self)
@@ -300,6 +356,144 @@ class MaintenanceDialog(tk.Toplevel):
                        "notes": self.notes.get("1.0", "end").strip()}
         self.destroy()
 
+class FuelDialog(tk.Toplevel):
+    def __init__(self, parent, desc, vin, prev_mileage_fn, record=None):
+        super().__init__(parent)
+        self.title("Edit Fuel Fillup" if record else "Add Fuel Fillup")
+        self.resizable(False, False)
+        self.result = None
+        self.prev_mileage_fn = prev_mileage_fn
+        has = lambda k: record is not None and record[k] is not None
+        self.vars = {
+            "date": tk.StringVar(value=record["service_date"] if record else date.today().isoformat()),
+            "mileage": tk.StringVar(value=f"{record['mileage']:,}" if has("mileage") else ""),
+            "quantity": tk.StringVar(value=f"{record['quantity']:g}" if has("quantity") else ""),
+        }
+        self.economy = tk.StringVar()
+        ttk.Label(self, text="Vehicle").grid(row=0, column=0, sticky="w", padx=10, pady=3)
+        ttk.Label(self, text=desc, font=("TkDefaultFont", 9, "bold")).grid(row=0, column=1, sticky="w", padx=10)
+        ttk.Label(self, text="VIN").grid(row=1, column=0, sticky="w", padx=10, pady=3)
+        ttk.Label(self, text=vin).grid(row=1, column=1, sticky="w", padx=10)
+        rows = [("Date (YYYY-MM-DD)", "date"), ("Mileage", "mileage"), ("Quantity (gallons)", "quantity")]
+        for r, (text, key) in enumerate(rows, start=2):
+            ttk.Label(self, text=text).grid(row=r, column=0, sticky="w", padx=10, pady=3)
+            ttk.Entry(self, width=24, textvariable=self.vars[key]).grid(row=r, column=1, sticky="w", padx=10, pady=3)
+        ttk.Label(self, text="Fuel economy").grid(row=5, column=0, sticky="w", padx=10, pady=3)
+        ttk.Label(self, textvariable=self.economy, font=("TkDefaultFont", 9, "bold")).grid(
+            row=5, column=1, sticky="w", padx=10)
+        btns = ttk.Frame(self)
+        btns.grid(row=6, column=0, columnspan=2, pady=10)
+        ttk.Button(btns, text="Save", command=self.save).pack(side="left", padx=6)
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=6)
+        for key in ("mileage", "quantity"):
+            self.vars[key].trace_add("write", lambda *a: self.update_economy())
+        self.update_economy()
+        center_on_parent(self, parent)
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.transient(parent)
+        self.grab_set()
+        self.wait_window(self)
+
+    def parse(self):
+        return int(self.vars["mileage"].get().replace(",", "")), float(self.vars["quantity"].get())
+
+    def update_economy(self):
+        try:
+            miles, qty = self.parse()
+        except ValueError:
+            self.economy.set("-")
+            return
+        mpg = mpg_from(miles, qty, self.prev_mileage_fn(miles))
+        self.economy.set(f"{mpg:.1f} MPG" if mpg else "- (no earlier fillup to compare)")
+
+    def save(self):
+        try:
+            when = self.vars["date"].get().strip()
+            datetime.strptime(when, "%Y-%m-%d")
+            miles, qty = self.parse()
+            if qty <= 0:
+                raise ValueError
+        except ValueError:
+            return messagebox.showerror(
+                "Invalid entry", "Enter a valid date (YYYY-MM-DD), mileage, and quantity.", parent=self)
+        self.result = {"date": when, "mileage": miles, "kind": "fuel", "quantity": qty,
+                       "service": f"Fuel Fillup, {qty:g} gallons"}
+        self.destroy()
+
+
+class CodeScanDialog(tk.Toplevel):
+    def __init__(self, parent, desc, vin, record=None):
+        super().__init__(parent)
+        self.title("Edit Code Scan" if record else "Add Code Scan")
+        self.resizable(False, False)
+        self.result = None
+        self.rows = []
+        self.vars = {
+            "date": tk.StringVar(value=record["service_date"] if record else date.today().isoformat()),
+            "mileage": tk.StringVar(value=f"{record['mileage']:,}" if record and record["mileage"] is not None else ""),
+            "service": tk.StringVar(value=record["service"] if record else "Code Scan"),
+        }
+        ttk.Label(self, text="Vehicle").grid(row=0, column=0, sticky="w", padx=10, pady=3)
+        ttk.Label(self, text=desc, font=("TkDefaultFont", 9, "bold")).grid(row=0, column=1, sticky="w", padx=10)
+        ttk.Label(self, text="VIN").grid(row=1, column=0, sticky="w", padx=10, pady=3)
+        ttk.Label(self, text=vin).grid(row=1, column=1, sticky="w", padx=10)
+        rows = [("Date (YYYY-MM-DD)", "date"), ("Mileage", "mileage"), ("Service", "service")]
+        for r, (text, key) in enumerate(rows, start=2):
+            ttk.Label(self, text=text).grid(row=r, column=0, sticky="w", padx=10, pady=3)
+            ttk.Entry(self, width=24, textvariable=self.vars[key]).grid(row=r, column=1, sticky="w", padx=10, pady=3)
+
+        self.codes_frame = ttk.LabelFrame(self, text="Codes")
+        self.codes_frame.grid(row=5, column=0, columnspan=2, sticky="ew", padx=10, pady=6)
+        head = ttk.Frame(self.codes_frame)
+        head.pack(fill="x", padx=4)
+        ttk.Label(head, text="Code", width=13).pack(side="left")
+        ttk.Label(head, text="Description").pack(side="left")
+        for code, text in (json.loads(record["codes"] or "[]") if record else []) or [("", "")]:
+            self.add_code_row(code, text)
+        ttk.Button(self, text="Add Code", command=self.add_code_row).grid(row=6, column=0, sticky="w", padx=10)
+
+        btns = ttk.Frame(self)
+        btns.grid(row=7, column=0, columnspan=2, pady=10)
+        ttk.Button(btns, text="Save", command=self.save).pack(side="left", padx=6)
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=6)
+        self.bind("<Escape>", lambda e: self.destroy())
+        center_on_parent(self, parent)
+        self.transient(parent)
+        self.grab_set()
+        self.wait_window(self)
+
+    def add_code_row(self, code="", text=""):
+        row = ttk.Frame(self.codes_frame)
+        row.pack(fill="x", padx=4, pady=2)
+        cv, dv = tk.StringVar(value=code), tk.StringVar(value=text)
+        ttk.Entry(row, width=12, textvariable=cv).pack(side="left")
+        ttk.Entry(row, width=42, textvariable=dv).pack(side="left", padx=6)
+        entry = (row, cv, dv)
+        ttk.Button(row, text="Remove", width=8, command=lambda e=entry: self.remove_code_row(e)).pack(side="left")
+        self.rows.append(entry)
+
+    def remove_code_row(self, entry):
+        if len(self.rows) == 1:  # always keep one row; just clear it
+            entry[1].set("")
+            entry[2].set("")
+            return
+        entry[0].destroy()
+        self.rows.remove(entry)
+
+    def save(self):
+        try:
+            when = self.vars["date"].get().strip()
+            datetime.strptime(when, "%Y-%m-%d")
+            raw = self.vars["mileage"].get().replace(",", "").strip()
+            miles = int(raw) if raw else None
+        except ValueError:
+            return messagebox.showerror("Invalid entry", "Check the date (YYYY-MM-DD) and mileage.", parent=self)
+        codes = [[c.get().strip(), d.get().strip()] for _, c, d in self.rows if c.get().strip()]
+        if not codes:
+            return messagebox.showerror("No codes", "Enter at least one code.", parent=self)
+        self.result = {"date": when, "mileage": miles, "kind": "codes", "codes": json.dumps(codes),
+                       "service": self.vars["service"].get().strip() or "Code Scan"}
+        self.destroy()
 
 class App(tk.Tk):
     def __init__(self):
@@ -332,21 +526,25 @@ class App(tk.Tk):
             row=1, column=4, padx=(0, 40), pady=(0, 10), sticky="nsew")
         self.combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_log())
 
-        BUTTONS = [("Custom Maintenance", None), ("3 Month Service", "3 Month"),
-                   ("6 Month Service", "6 Month"), ("3 Year Service", "3 Year")]
+        BUTTONS = [("Custom Maint.", lambda: self.add_maintenance(None)),
+                   ("3 Month Service", lambda: self.add_maintenance("3 Month")),
+                   ("6 Month Service", lambda: self.add_maintenance("6 Month")),
+                   ("3 Year Service", lambda: self.add_maintenance("3 Year")),
+                   ("Fuel Fillup", self.add_fuel),
+                   ("Code Scan", self.add_code_scan)]
         g = ttk.LabelFrame(self, text="Add Maintenance")
         g.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
-        for col, (label, kind) in enumerate(BUTTONS):
+        for col, (label, command) in enumerate(BUTTONS):
             g.columnconfigure(col, weight=1)
-            ttk.Button(g, text=label, width=22, command=lambda k=kind: self.add_maintenance(k)).grid(
-                row=0, column=col, padx=8, pady=10, ipady=4)
+            ttk.Button(g, text=label, width=16, command=command).grid(
+                row=0, column=col, padx=4, pady=10, ipady=4)
 
         g = ttk.LabelFrame(self, text="Maintenance Log")
         g.grid(row=2, column=0, sticky="nsew", padx=12, pady=(6, 12))
         g.columnconfigure(0, weight=1)
         g.rowconfigure(0, weight=1)
         cols = (("date", "Date", 100, "w"), ("mileage", "Mileage", 100, "e"),
-                ("service", "Service", 220, "w"), ("scan", "Scan", 60, "center"))
+                ("service", "Service", 230, "w"), ("details", "Details", 300, "w"))
         self.tree = ttk.Treeview(g, columns=[c[0] for c in cols], show="headings", selectmode="browse")
         for key, text, width, anchor in cols:
             self.tree.heading(key, text=text)
@@ -393,6 +591,9 @@ class App(tk.Tk):
         for kind, label in MENU_INTERVALS:
             add_m.add_command(label=label, command=lambda k=kind: self.add_maintenance(k))
             print_m.add_command(label=label, command=lambda k=kind: self.print_form(k))
+        add_m.add_separator()
+        add_m.add_command(label="Fuel Fillup...", command=self.add_fuel)
+        add_m.add_command(label="Code Scan...", command=self.add_code_scan)
         bar.add_cascade(label="Add Maintenance", menu=add_m)
         bar.add_cascade(label="Print Form", menu=print_m)
 
@@ -504,13 +705,62 @@ class App(tk.Tk):
         v = self.current_vehicle()
         if not v:
             return
-        one = lambda s: (s or "").replace("\n", "; ")
-        for r in self.db.log(v["id"]):
+        rows = self.db.log(v["id"])
+        fuel = sorted((r for r in rows if r["kind"] == "fuel" and r["mileage"] is not None),
+                      key=lambda r: r["mileage"])
+        mpg = {cur["id"]: mpg_from(cur["mileage"], cur["quantity"], prev["mileage"] if prev else None)
+               for prev, cur in zip([None] + fuel[:-1], fuel)}
+        for r in rows:
+            if r["kind"] == "fuel":
+                m = mpg.get(r["id"])
+                details = f"{m:.1f} MPG" if m else ""
+            elif r["kind"] == "codes":
+                details = codes_summary(r["codes"])
+            else:
+                details = "Scan attached" if r["scan_path"] else ""
             self.tree.insert("", "end", iid=str(r["id"]), values=(
                 r["service_date"],
                 f"{r['mileage']:,}" if r["mileage"] is not None else "",
-                r["service"],
-                "Yes" if r["scan_path"] else ""))
+                r["service"], details))
+
+    def add_fuel(self):
+        v = self.require_vehicle()
+        if not v:
+            return
+        desc = vehicle_desc(v)
+        dlg = FuelDialog(self, desc, v["vin"], lambda miles: self.db.prev_fuel_mileage(v["id"], miles))
+        if dlg.result:
+            self.db.add_log(v["id"], {**dlg.result, "vehicle_desc": desc, "vin": v["vin"]})
+            self.refresh_log()
+
+    def add_code_scan(self):
+        v = self.require_vehicle()
+        if not v:
+            return
+        desc = vehicle_desc(v)
+        dlg = CodeScanDialog(self, desc, v["vin"])
+        if dlg.result:
+            self.db.add_log(v["id"], {**dlg.result, "vehicle_desc": desc, "vin": v["vin"]})
+            self.refresh_log()
+
+    def edit_entry(self):
+        log_id, v = self.selected_id(), self.current_vehicle()
+        if not log_id or not v:
+            return
+        rec = self.db.get_log(log_id)
+        desc, vin, kind = rec["vehicle_desc"] or vehicle_desc(v), rec["vin"] or v["vin"], rec["kind"]
+        if kind == "fuel":
+            dlg = FuelDialog(self, desc, vin, lambda m: self.db.prev_fuel_mileage(v["id"], m, log_id), rec)
+        elif kind == "codes":
+            dlg = CodeScanDialog(self, desc, vin, rec)
+        else:
+            dlg = MaintenanceDialog(self, desc, vin, rec)
+        if dlg.result:
+            d = {**record_to_dict(rec), **dlg.result}
+            if kind not in ("fuel", "codes"):
+                d["scan_path"] = self.finish_scan(d["scan_path"], vin, d["date"], d["service"])
+            self.db.update_log(log_id, d)
+            self.refresh_log()
 
     def finish_scan(self, path, vin, when, service):
         """Copy a newly chosen (absolute) scan into scans/; leave stored paths alone."""
@@ -533,18 +783,6 @@ class App(tk.Tk):
             d["scan_path"] = self.finish_scan(d["scan_path"], v["vin"], d["date"], d["service"])
             d.update(vehicle_desc=desc, vin=v["vin"])
             self.db.add_log(v["id"], d)
-            self.refresh_log()
-
-    def edit_entry(self):
-        log_id, v = self.selected_id(), self.current_vehicle()
-        if not log_id or not v:
-            return
-        rec = self.db.get_log(log_id)
-        dlg = MaintenanceDialog(self, rec["vehicle_desc"] or vehicle_desc(v), rec["vin"] or v["vin"], rec)
-        if dlg.result:
-            d = dlg.result
-            d["scan_path"] = self.finish_scan(d["scan_path"], rec["vin"] or v["vin"], d["date"], d["service"])
-            self.db.update_log(log_id, d)
             self.refresh_log()
 
     def open_scan(self):
